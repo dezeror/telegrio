@@ -574,6 +574,7 @@ import android.graphics.drawable.GradientDrawable;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.TextView;
+import android.widget.FrameLayout;
 
 import org.telegram.messenger.AndroidUtilities;
 
@@ -2939,6 +2940,7 @@ import android.graphics.Paint;
 import android.view.Gravity;
 import android.widget.SeekBar;
 import android.widget.TextView;
+import android.widget.FrameLayout;
 
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.ui.ActionBar.Theme;
