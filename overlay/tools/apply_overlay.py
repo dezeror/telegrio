@@ -1083,6 +1083,14 @@ public class TelegriosCrashActivity extends Activity {
         row.addView(makeButton("\u0417\u0430\u043A\u0440\u044B\u0442\u044C", v -> closeApp()));
 
         setContentView(root);
+
+        // Showing the report means the UI works: clear the boot trace so the
+        // next launch always runs the normal initialization path.
+        try {
+            org.telegram.telegrios.TelegriosCrashHook.mark(this, "UI_READY (report shown)");
+            org.telegram.telegrios.TelegriosCrashHook.uiReady(this);
+        } catch (Throwable ignore) {
+        }
     }
 
     private Button makeButton(String label, View.OnClickListener listener) {
@@ -3945,18 +3953,12 @@ def patch_application_loader(main_dir):
     # 2) safe-mode short-circuit at the very start of onCreate
     a2 = "        applicationLoaderInstance = this;"
     r2 = (a2 + "\n"
-          "\n"
-          "        if (org.telegram.telegrios.TelegriosCrashHook.enterSafeModeIfJustCrashed(this)) {\n"
-          '            org.telegram.telegrios.TelegriosCrashHook.mark(this, "safe mode: previous session crashed");\n'
-          "            super.onCreate();\n"
-          "            org.telegram.telegrios.TelegriosCrashActivity.launchSafeMode(this);\n"
-          "            return;\n"
-          "        }")
-    if "enterSafeModeIfJustCrashed(this)" in text:
-        changed.append("safe mode present")
+          '        org.telegram.telegrios.TelegriosCrashHook.mark(this, "ApplicationLoader.onCreate");')
+    if "TelegriosCrashHook.mark(this, \"ApplicationLoader.onCreate\")" in text:
+        changed.append("onCreate milestone present")
     elif a2 in text:
         text = text.replace(a2, r2, 1)
-        changed.append("safe mode installed")
+        changed.append("onCreate milestone")
     else:
         step("ApplicationLoader: safe mode", False, "anchor not found")
 
