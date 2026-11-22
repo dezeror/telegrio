@@ -4044,13 +4044,35 @@ def patch_launch_activity(main_dir):
         text = text.replace(a2,
             '    protected void onResume() {\n'
             "        super.onResume();\n"
+            "        if (org.telegram.telegrios.TelegriosCrashHook.isInSafeMode()) {\n"
+            '            org.telegram.telegrios.TelegriosCrashHook.mark(this, "LaunchActivity: safe mode resume bail-out");\n'
+            "            return;\n"
+            "        }\n"
             '        org.telegram.telegrios.TelegriosCrashHook.uiReady(this);\n'
             "        isResumed = true;", 1)
         changed.append("uiReady marker")
     else:
         step("LaunchActivity: onResume anchor", False, "not found")
+    # onDestroy: guard receiver unregistration (safe-mode finish() path never registers them)
+    if "catch (Throwable ignore) {\n        }\n\n        if (activeInstanceCount == 0)" not in text:
+        a3 = "        unregisterReceiver(batteryReceiver);"
+        if a3 in text:
+            text = text.replace(a3,
+                "        try {\n"
+                "            unregisterReceiver(batteryReceiver);\n"
+                "        } catch (Throwable ignore) {\n"
+                "        }", 1)
+            changed.append("onDestroy battery guard")
+        a4 = "            MonetHelper.unregisterReceiver(this);"
+        if a4 in text:
+            text = text.replace(a4,
+                "            try {\n"
+                "                MonetHelper.unregisterReceiver(this);\n"
+                "            } catch (Throwable ignore) {\n"
+                "            }", 1)
+            changed.append("onDestroy monet guard")
     open(p, "w", encoding="utf-8").write(text)
-    step("LaunchActivity: diagnostics v3 (" + ", ".join(changed) + ")", len(changed) >= 2)
+    step("LaunchActivity: diagnostics v4 (" + ", ".join(changed) + ")", len(changed) >= 2)
 
 def patch_manifest(main_dir):
     p = os.path.join(main_dir, "AndroidManifest.xml")
