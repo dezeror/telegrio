@@ -1241,6 +1241,17 @@ import java.util.Date;
  */
 public final class TelegriosCrashHook {
 
+    private static volatile boolean safeMode = false;
+
+    public static void setSafeMode(boolean v) {
+        safeMode = v;
+    }
+
+    /** True when Application.onCreate redirected this session into the report screen. */
+    public static boolean isInSafeMode() {
+        return safeMode;
+    }
+
     private static final long CRASH_REPORT_WINDOW_MS = 10 * 60_000L;
 
     private TelegriosCrashHook() {
@@ -3953,12 +3964,27 @@ def patch_application_loader(main_dir):
     # 2) safe-mode short-circuit at the very start of onCreate
     a2 = "        applicationLoaderInstance = this;"
     r2 = (a2 + "\n"
+          "\n"
+          "        // applicationContext MUST be set before any early return (v1.3 bug: NPE in PipDuration)\n"
+          "        try {\n"
+          "            applicationContext = getApplicationContext();\n"
+          "        } catch (Throwable ignore) {\n"
+          "        }\n"
+          "\n"
+          "        if (org.telegram.telegrios.TelegriosCrashHook.enterSafeModeIfJustCrashed(this)) {\n"
+          '            org.telegram.telegrios.TelegriosCrashHook.setSafeMode(true);\n'
+          '            org.telegram.telegrios.TelegriosCrashHook.mark(this, "safe mode: showing last crash report");\n'
+          "            super.onCreate();\n"
+          "            org.telegram.telegrios.TelegriosCrashActivity.launchSafeMode(this);\n"
+          "            return;\n"
+          "        }\n"
+          "\n"
           '        org.telegram.telegrios.TelegriosCrashHook.mark(this, "ApplicationLoader.onCreate");')
-    if "TelegriosCrashHook.mark(this, \"ApplicationLoader.onCreate\")" in text:
-        changed.append("onCreate milestone present")
+    if "safe mode: showing last crash report" in text:
+        changed.append("safe mode v4 present")
     elif a2 in text:
         text = text.replace(a2, r2, 1)
-        changed.append("onCreate milestone")
+        changed.append("safe mode v4")
     else:
         step("ApplicationLoader: safe mode", False, "anchor not found")
 
@@ -3991,12 +4017,20 @@ def patch_launch_activity(main_dir):
     changed = []
     a1 = ("    protected void onCreate(Bundle savedInstanceState) {\n"
           "        isActive = true;")
-    if "TelegriosCrashHook.mark(this, \"LaunchActivity.onCreate\")" in text:
+    if "LaunchActivity: safe mode redirect" in text:
         changed.append("onCreate milestone present")
     elif a1 in text:
         text = text.replace(a1,
             '    protected void onCreate(Bundle savedInstanceState) {\n'
             '        org.telegram.telegrios.TelegriosCrashHook.mark(this, "LaunchActivity.onCreate");\n'
+            "        if (org.telegram.telegrios.TelegriosCrashHook.isInSafeMode()) {\n"
+            '            org.telegram.telegrios.TelegriosCrashHook.mark(this, "LaunchActivity: safe mode redirect");\n'
+            "            isActive = true;\n"
+            "            super.onCreate(savedInstanceState);\n"
+            "            org.telegram.telegrios.TelegriosCrashActivity.launchSafeMode(this);\n"
+            "            finish();\n"
+            "            return;\n"
+            "        }\n"
             "        isActive = true;", 1)
         changed.append("onCreate milestone")
     else:
