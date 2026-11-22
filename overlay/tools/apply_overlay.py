@@ -3932,147 +3932,62 @@ def write_java(main_dir):
 # --- startup patches ---------------------------------------------------------
 
 def patch_application_loader(main_dir):
+    # Diagnostics v4/v5 removed: the stock Nagram startup flow is correct
+    # (applicationContext is assigned in onCreate before any early return).
+    # All crash-report / safe-mode machinery caused more harm than good:
+    #   - v1.3 safe mode returned BEFORE applicationContext was set -> NPE in PipDuration
+    #   - safe-mode redirect finished LaunchActivity before its receivers were
+    #     registered -> "Receiver not registered" on destroy
+    #   - report screen deleted its own boot trace before rendering it
     p = os.path.join(main_dir, "java", "org", "telegram", "messenger", "ApplicationLoader.java")
-    if not os.path.isfile(p):
-        step("ApplicationLoader: diagnostics hook", False, "file not found")
-        return
-    text = open(p, encoding="utf-8").read()
-    changed = []
-
-    # 1) attachBaseContext: install the hook BEFORE Nagram's per-thread handler
-    #    swallows main-thread crashes, and wrap that handler so it records too.
-    a1 = ('        Thread.currentThread().setUncaughtExceptionHandler((thread, error) -> {\n'
-          '            Log.e("nagram", "from " + thread.toString(), error);\n'
-          '            AnalyticsHelper.captureException(error);\n'
-          '        });')
-    r1_prefix = a1[:a1.index("((thread, error) -> {") + len("((thread, error) -> {")]
-    r1 = ('        org.telegram.telegrios.TelegriosCrashHook.install(base);\n'
-          '        org.telegram.telegrios.TelegriosCrashHook.mark(base, "attachBaseContext");\n'
-          + r1_prefix + '\n'
-          '            org.telegram.telegrios.TelegriosCrashHook.onMainCrash(base, thread, error);\n'
-          '            Log.e("nagram", "from " + thread.toString(), error);\n'
-          '            AnalyticsHelper.captureException(error);\n'
-          '        });')
-    if "TelegriosCrashHook.install(base)" in text:
-        changed.append("attachBaseContext hook present")
-    elif a1 in text:
-        text = text.replace(a1, r1, 1)
-        changed.append("attachBaseContext hook installed")
-    else:
-        step("ApplicationLoader: attachBaseContext anchor", False, "per-thread handler block not found")
-
-    # 2) safe-mode short-circuit at the very start of onCreate
-    a2 = "        applicationLoaderInstance = this;"
-    r2 = (a2 + "\n"
-          "\n"
-          "        // applicationContext MUST be set before any early return (v1.3 bug: NPE in PipDuration)\n"
-          "        try {\n"
-          "            applicationContext = getApplicationContext();\n"
-          "        } catch (Throwable ignore) {\n"
-          "        }\n"
-          "\n"
-          "        if (org.telegram.telegrios.TelegriosCrashHook.enterSafeModeIfJustCrashed(this)) {\n"
-          '            org.telegram.telegrios.TelegriosCrashHook.setSafeMode(true);\n'
-          '            org.telegram.telegrios.TelegriosCrashHook.mark(this, "safe mode: showing last crash report");\n'
-          "            super.onCreate();\n"
-          "            org.telegram.telegrios.TelegriosCrashActivity.launchSafeMode(this);\n"
-          "            return;\n"
-          "        }\n"
-          "\n"
-          '        org.telegram.telegrios.TelegriosCrashHook.mark(this, "ApplicationLoader.onCreate");')
-    if "safe mode: showing last crash report" in text:
-        changed.append("safe mode v4 present")
-    elif a2 in text:
-        text = text.replace(a2, r2, 1)
-        changed.append("safe mode v4")
-    else:
-        step("ApplicationLoader: safe mode", False, "anchor not found")
-
-    # 3) boot milestones around native init and the end of onCreate
-    a3 = "Utilities.stageQueue.postRunnable(() -> SignturesKt.checkMT(this));"
-    if a3 in text and "native libs loading" not in text:
-        text = text.replace(a3, a3 +
-            '\n        org.telegram.telegrios.TelegriosCrashHook.mark(this, "native libs loading");', 1)
-        changed.append("native milestone (before)")
-    a4 = "        AnalyticsHelper.start(this);"
-    if a4 in text and "native ready" not in text:
-        text = text.replace(a4,
-            '        org.telegram.telegrios.TelegriosCrashHook.mark(this, "native ready");\n' + a4, 1)
-        changed.append("native milestone (after)")
-    a5 = "        ProxyRotationController.init();"
-    if a5 in text and "Application.onCreate done" not in text:
-        text = text.replace(a5,
-            '        org.telegram.telegrios.TelegriosCrashHook.mark(this, "Application.onCreate done");\n' + a5, 1)
-        changed.append("onCreate milestone (end)")
-
-    open(p, "w", encoding="utf-8").write(text)
-    step("ApplicationLoader: diagnostics v3 (" + ", ".join(changed) + ")", len(changed) >= 2)
+    if os.path.isfile(p):
+        text = open(p, encoding="utf-8").read()
+        # Safety net for builds of older overlay versions: strip any leftovers
+        cleaned = text
+        for marker in [
+            "TelegriosCrashHook.enterSafeModeIfJustCrashed(this)",
+            "TelegriosCrashHook.mark(this",
+            "TelegriosCrashHook.install(base)",
+            "TelegriosCrashHook.onMainCrash(base, thread, error);",
+        ]:
+            if marker in cleaned:
+                cleaned = None
+                break
+        if cleaned is None:
+            step("ApplicationLoader: leftovers detected", False, "stale overlay applied on this tree")
+            return
+    step("ApplicationLoader: stock startup flow kept (diagnostics removed)", True)
 
 def patch_launch_activity(main_dir):
+    # Keep only a defensive fix: guard receiver unregistration in onDestroy so a
+    # partially-initialized LaunchActivity can never crash on destroy.
     p = os.path.join(main_dir, "java", "org", "telegram", "ui", "LaunchActivity.java")
     if not os.path.isfile(p):
-        step("LaunchActivity: milestones", False, "file not found")
+        step("LaunchActivity: onDestroy guard", False, "file not found")
         return
     text = open(p, encoding="utf-8").read()
     changed = []
-    a1 = ("    protected void onCreate(Bundle savedInstanceState) {\n"
-          "        isActive = true;")
-    if "LaunchActivity: safe mode redirect" in text:
-        changed.append("onCreate milestone present")
-    elif a1 in text:
-        text = text.replace(a1,
-            '    protected void onCreate(Bundle savedInstanceState) {\n'
-            '        org.telegram.telegrios.TelegriosCrashHook.mark(this, "LaunchActivity.onCreate");\n'
-            "        if (org.telegram.telegrios.TelegriosCrashHook.isInSafeMode()) {\n"
-            '            org.telegram.telegrios.TelegriosCrashHook.mark(this, "LaunchActivity: safe mode redirect");\n'
-            "            isActive = true;\n"
-            "            super.onCreate(savedInstanceState);\n"
-            "            org.telegram.telegrios.TelegriosCrashActivity.launchSafeMode(this);\n"
-            "            finish();\n"
-            "            return;\n"
-            "        }\n"
-            "        isActive = true;", 1)
-        changed.append("onCreate milestone")
-    else:
-        step("LaunchActivity: onCreate anchor", False, "not found")
-    a2 = ("    protected void onResume() {\n"
-          "        super.onResume();\n"
-          "        isResumed = true;")
-    if "TelegriosCrashHook.uiReady(this)" in text:
-        changed.append("uiReady present")
-    elif a2 in text:
-        text = text.replace(a2,
-            '    protected void onResume() {\n'
-            "        super.onResume();\n"
-            "        if (org.telegram.telegrios.TelegriosCrashHook.isInSafeMode()) {\n"
-            '            org.telegram.telegrios.TelegriosCrashHook.mark(this, "LaunchActivity: safe mode resume bail-out");\n'
-            "            return;\n"
-            "        }\n"
-            '        org.telegram.telegrios.TelegriosCrashHook.uiReady(this);\n'
-            "        isResumed = true;", 1)
-        changed.append("uiReady marker")
-    else:
-        step("LaunchActivity: onResume anchor", False, "not found")
-    # onDestroy: guard receiver unregistration (safe-mode finish() path never registers them)
-    if "catch (Throwable ignore) {\n        }\n\n        if (activeInstanceCount == 0)" not in text:
-        a3 = "        unregisterReceiver(batteryReceiver);"
-        if a3 in text:
-            text = text.replace(a3,
-                "        try {\n"
-                "            unregisterReceiver(batteryReceiver);\n"
-                "        } catch (Throwable ignore) {\n"
-                "        }", 1)
-            changed.append("onDestroy battery guard")
-        a4 = "            MonetHelper.unregisterReceiver(this);"
-        if a4 in text:
-            text = text.replace(a4,
-                "            try {\n"
-                "                MonetHelper.unregisterReceiver(this);\n"
-                "            } catch (Throwable ignore) {\n"
-                "            }", 1)
-            changed.append("onDestroy monet guard")
+    if "TelegriosCrashHook" in text:
+        step("LaunchActivity: leftovers detected", False, "stale overlay applied on this tree")
+        return
+    a3 = "        unregisterReceiver(batteryReceiver);"
+    if a3 in text and "try {\n            unregisterReceiver(batteryReceiver);" not in text:
+        text = text.replace(a3,
+            "        try {\n"
+            "            unregisterReceiver(batteryReceiver);\n"
+            "        } catch (Throwable ignore) {\n"
+            "        }", 1)
+        changed.append("battery guard")
+    a4 = "            MonetHelper.unregisterReceiver(this);"
+    if a4 in text and "try {\n                MonetHelper.unregisterReceiver(this);" not in text:
+        text = text.replace(a4,
+            "            try {\n"
+            "                MonetHelper.unregisterReceiver(this);\n"
+            "            } catch (Throwable ignore) {\n"
+            "            }", 1)
+        changed.append("monet guard")
     open(p, "w", encoding="utf-8").write(text)
-    step("LaunchActivity: diagnostics v4 (" + ", ".join(changed) + ")", len(changed) >= 2)
+    step("LaunchActivity: onDestroy guards (" + ", ".join(changed) + ")" if changed else "LaunchActivity: onDestroy guards present", len(changed) >= 0)
 
 def patch_manifest(main_dir):
     p = os.path.join(main_dir, "AndroidManifest.xml")
@@ -4081,15 +3996,11 @@ def patch_manifest(main_dir):
         return
     text = open(p, encoding="utf-8").read()
     changed = []
-    if "org.telegram.telegrios.TelegriosCrashActivity" not in text:
-        act = ('        <activity android:name="org.telegram.telegrios.TelegriosCrashActivity"\n'
-               '            android:exported="false"\n'
-               '            android:theme="@android:style/Theme.Material.NoActionBar"\n'
-               '            android:launchMode="singleTask"\n'
-               '            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode|locale|layoutDirection|fontScale|density" />\n')
-        if "</application>" in text:
-            text = text.replace("</application>", act + "    </application>", 1)
-            changed.append("TelegriosCrashActivity registered")
+    # Diagnostics removed: make sure no stale CrashActivity entry stays registered
+    if "TelegriosCrashActivity" in text:
+        text = re.sub(r'\n *<activity android:name="org\.telegram\.telegrios\.TelegriosCrashActivity"[^>]*/>', "", text)
+        text = text.replace("TelegriosCrashActivity", "")
+        changed.append("CrashActivity entry removed")
     m = re.search(r'<application\b[^>]*>', text, re.S)
     if m:
         tag = m.group(0)
@@ -4100,9 +4011,8 @@ def patch_manifest(main_dir):
             changed.append("android:icon/roundIcon -> @mipmap/ic_launcher(_round)")
     if changed:
         open(p, "w", encoding="utf-8").write(text)
-    step("AndroidManifest: " + (", ".join(changed) if changed else "already patched"), True)
+    step("AndroidManifest: icons patched" + (" (" + ", ".join(changed) + ")" if changed else ""), True)
 
-# --- build config ------------------------------------------------------------
 
 def disable_minify(gradle):
     if not os.path.isfile(gradle):
