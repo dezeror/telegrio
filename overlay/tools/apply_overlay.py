@@ -3919,6 +3919,51 @@ def generate_icons(res):
 
 # --- Java sources ------------------------------------------------------------
 
+JAVA_FILES["org/telegram/telegrios/TelegriosMiniLog.java"] = r"""package org.telegram.telegrios;
+
+import org.telegram.messenger.ApplicationLoader;
+
+/**
+ * Minimal, UI-free crash logger: appends stack traces to a shareable file.
+ * Does NOT interfere with the startup flow in any way - it only writes files.
+ */
+public final class TelegriosMiniLog {
+
+    private TelegriosMiniLog() { }
+
+    public static void dump(Thread thread, Throwable error) {
+        try {
+            android.content.Context ctx = ApplicationLoader.applicationContext;
+            if (ctx == null) {
+                return;
+            }
+            StringBuilder sb = new StringBuilder();
+            sb.append("=== Telegrios crash @ ").append(new java.util.Date());
+            if (thread != null) {
+                sb.append("  thread: ").append(thread.getName());
+            }
+            sb.append('\n');
+            sb.append(android.util.Log.getStackTraceString(error != null ? error : new Throwable("unknown")));
+            sb.append('\n');
+            java.io.File dir = ctx.getExternalFilesDir(null);
+            if (dir != null) {
+                append(new java.io.File(dir, "telegrios_crash.txt"), sb.toString());
+            }
+            append(new java.io.File(android.os.Environment.getExternalStoragePublicDirectory(
+                    android.os.Environment.DIRECTORY_DOWNLOADS), "telegrios_crash.txt"), sb.toString());
+        } catch (Throwable ignore) { }
+    }
+
+    private static void append(java.io.File f, String text) {
+        try {
+            java.io.FileWriter w = new java.io.FileWriter(f, true);
+            w.write(text);
+            w.close();
+        } catch (Throwable ignore) { }
+    }
+}
+"""
+
 def write_java(main_dir):
     root = os.path.join(main_dir, "java")
     n = 0
@@ -3932,31 +3977,63 @@ def write_java(main_dir):
 # --- startup patches ---------------------------------------------------------
 
 def patch_application_loader(main_dir):
-    # Diagnostics v4/v5 removed: the stock Nagram startup flow is correct
-    # (applicationContext is assigned in onCreate before any early return).
-    # All crash-report / safe-mode machinery caused more harm than good:
-    #   - v1.3 safe mode returned BEFORE applicationContext was set -> NPE in PipDuration
-    #   - safe-mode redirect finished LaunchActivity before its receivers were
-    #     registered -> "Receiver not registered" on destroy
-    #   - report screen deleted its own boot trace before rendering it
+    # Passive crash logging only: append stack traces to a shareable file.
+    # NO flow changes, NO early returns, NO activities launched.
     p = os.path.join(main_dir, "java", "org", "telegram", "messenger", "ApplicationLoader.java")
-    if os.path.isfile(p):
-        text = open(p, encoding="utf-8").read()
-        # Safety net for builds of older overlay versions: strip any leftovers
-        cleaned = text
-        for marker in [
-            "TelegriosCrashHook.enterSafeModeIfJustCrashed(this)",
-            "TelegriosCrashHook.mark(this",
-            "TelegriosCrashHook.install(base)",
-            "TelegriosCrashHook.onMainCrash(base, thread, error);",
-        ]:
-            if marker in cleaned:
-                cleaned = None
-                break
-        if cleaned is None:
-            step("ApplicationLoader: leftovers detected", False, "stale overlay applied on this tree")
-            return
-    step("ApplicationLoader: stock startup flow kept (diagnostics removed)", True)
+    if not os.path.isfile(p):
+        step("ApplicationLoader: crash logger", False, "file not found")
+        return
+    text = open(p, encoding="utf-8").read()
+    changed = []
+
+    # (a) wrap Nagram's main-thread handler (installed in attachBaseContext):
+    #     write the trace to the file, then let Nagram's original body run unchanged.
+    a1 = ('        Thread.currentThread().setUncaughtExceptionHandler((thread, error) -> {\n'
+          '            Log.e("nagram", "from " + thread.toString(), error);')
+    if "TelegriosMiniLog.dump(thread, error);" in text:
+        changed.append("main-thread logger present")
+    elif a1 in text:
+        text = text.replace(a1,
+            '        Thread.currentThread().setUncaughtExceptionHandler((thread, error) -> {\n'
+            '            org.telegram.telegrios.TelegriosMiniLog.dump(thread, error);\n'
+            '            Log.e("nagram", "from " + thread.toString(), error);', 1)
+        changed.append("main-thread logger")
+    else:
+        step("ApplicationLoader: main handler anchor", False, "not found")
+
+    # (b) default handler for background threads, right after applicationContext
+    #     is assigned in onCreate (no early return, startup flow untouched).
+    a2 = ('            applicationContext = getApplicationContext();\n'
+          '        } catch (Throwable ignore) {\n'
+          '        }\n'
+          '\n'
+          '        super.onCreate();')
+    r2 = ('            applicationContext = getApplicationContext();\n'
+          '        } catch (Throwable ignore) {\n'
+          '        }\n'
+          '\n'
+          '        try {\n'
+          '            final Thread.UncaughtExceptionHandler previousDefault = Thread.getDefaultUncaughtExceptionHandler();\n'
+          '            Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {\n'
+          '                org.telegram.telegrios.TelegriosMiniLog.dump(thread, error);\n'
+          '                if (previousDefault != null) {\n'
+          '                    previousDefault.uncaughtException(thread, error);\n'
+          '                }\n'
+          '            });\n'
+          '        } catch (Throwable ignore) {\n'
+          '        }\n'
+          '\n'
+          '        super.onCreate();')
+    if "previousDefault" in text:
+        changed.append("default logger present")
+    elif a2 in text:
+        text = text.replace(a2, r2, 1)
+        changed.append("default logger")
+    else:
+        step("ApplicationLoader: onCreate anchor", False, "not found")
+
+    open(p, "w", encoding="utf-8").write(text)
+    step("ApplicationLoader: crash logger (" + ", ".join(changed) + ")", len(changed) == 2)
 
 def patch_launch_activity(main_dir):
     # Keep only a defensive fix: guard receiver unregistration in onDestroy so a
