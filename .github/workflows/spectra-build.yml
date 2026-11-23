@@ -112,6 +112,21 @@ jobs:
           echo "Building $TASK ..."
           ./gradlew "$TASK" --build-cache --no-configuration-cache 2>&1 | tee build.log
 
+      - name: Verify native libs inside the APK
+        run: |
+          APK=$(find nagram/TMessagesProj/build/outputs/apk -name "*arm64-v8a*.apk" | head -1)
+          if [ -z "$APK" ]; then
+            echo "::error::No arm64-v8a APK produced by the build"
+            exit 1
+          fi
+          if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libtmessages"; then
+            echo "::error::$APK has no native libraries (lib/arm64-v8a) - such an APK would crash at startup"
+            unzip -l "$APK" | grep "lib/" | head -10 || true
+            exit 1
+          fi
+          echo "Native libs OK in $(basename "$APK"):"
+          unzip -l "$APK" | grep "lib/arm64-v8a/" | head -10
+
       - name: Collect artifacts
         run: |
           mkdir -p out
