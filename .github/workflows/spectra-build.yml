@@ -1,16 +1,18 @@
 name: Telegrios Build
 
-# One-click build of the Telegrios mod APK (v1.3):
-#   1) clone Nagram with submodules (native libs build via Gradle CMake)
-#   2) install NDK + CMake, apply the Telegrios overlay (branding org.telegrios.messenger,
-#      Telegram-style icons, three themes incl. iOS Light/Dark, diagnostics v3)
-#   3) generate (or take from repo secrets) a signing keystore
-#   4) assemble an arm64-v8a APK (release by default, debug optional) — signed and installable
+# One-click build of the Telegrios mod APK (v2.0) from OFFICIAL Telegram sources:
+#   1) clone https://github.com/TelegramMessenger/Telegram-Android (shallow, with submodules)
+#   2) install NDK + CMake, apply the Telegrios overlay
+#      (package org.telegrios.messenger, Telegram-style icons, 3 themes,
+#       Ghost Mode hooks, "Telegrios Settings" entry)
+#   3) sign with the repo secrets (recommended) or with the keystore committed
+#      in the official tree (placeholder creds, still stable between runs)
+#   4) assemble the arm64-v8a release APK
 #
-# Optional repo secrets for a STABLE signing key (so updates install over older builds):
-#   ANDROID_KEYSTORE_B64  — base64-encoded .jks keystore
+# Optional repo secrets for a STABLE signing key (recommended):
+#   ANDROID_KEYSTORE_B64  — base64-encoded .jks/.p12 keystore
 #   ANDROID_KEYSTORE_PASS — keystore password
-#   ANDROID_KEY_ALIAS     — key alias
+#   ANDROID_KEY_ALIAS     — key alias (e.g. telegrios)
 #   ANDROID_KEY_PASS      — key password
 
 on:
@@ -24,7 +26,7 @@ on:
         options: [release, debug]
   push:
     branches: [ main, master ]
-    paths: [ 'overlay/**', 'spec/**', '.github/workflows/spectra-build.yml' ]
+    paths: [ 'overlay/**', '.github/workflows/spectra-build.yml' ]
 
 concurrency:
   group: telegrios-build
@@ -33,15 +35,15 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - name: Checkout Telegrios overlay
         uses: actions/checkout@v4
 
-      - name: Clone Nagram (shallow, with submodules)
+      - name: Clone official Telegram-Android (shallow, with submodules)
         run: |
-          git clone --depth 1 --recurse-submodules -j8 https://github.com/NextAlone/Nagram.git nagram
-          echo "NAGRAM_COMMIT=$(git -C nagram rev-parse HEAD)" >> $GITHUB_ENV
+          git clone --depth 1 --recurse-submodules -j8 https://github.com/TelegramMessenger/Telegram-Android.git telegram
+          echo "TELEGRAM_COMMIT=$(git -C telegram rev-parse HEAD)" >> $GITHUB_ENV
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -55,68 +57,52 @@ jobs:
       - name: Install NDK 27.2.12479018 + CMake 3.22.1
         run: |
           echo "y" | sdkmanager --install "ndk;27.2.12479018" "cmake;3.22.1" --sdk_root="$ANDROID_HOME" > /dev/null
-          {
-            echo "sdk.dir=$ANDROID_HOME"
-            echo "TELEGRAM_APP_ID=12834"
-            echo "TELEGRAM_APP_HASH=c84d9229db1d6be95c067b02b126352c"
-          } > nagram/local.properties
+          echo "sdk.dir=$ANDROID_HOME" > telegram/local.properties
 
       - name: Apply Telegrios overlay
         run: |
           python3 -m pip install --quiet pillow
-          python3 overlay/tools/apply_overlay.py --repo "$GITHUB_WORKSPACE/nagram"
+          python3 overlay/tools/apply_overlay.py --repo "$GITHUB_WORKSPACE/telegram"
 
-      - name: Prepare signing keystore (secrets, or generated)
+      - name: Prepare signing keystore (secrets, or the committed placeholder)
         env:
           ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
           ANDROID_KEYSTORE_PASS: ${{ secrets.ANDROID_KEYSTORE_PASS }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASS: ${{ secrets.ANDROID_KEY_PASS }}
         run: |
-          KS=nagram/TMessagesProj/release.keystore
+          KS=telegram/TMessagesProj/config/release.keystore
           if [ -n "$ANDROID_KEYSTORE_B64" ]; then
             echo "$ANDROID_KEYSTORE_B64" | base64 -d > "$KS"
             {
-              echo "KEYSTORE_PASS=$ANDROID_KEYSTORE_PASS"
-              echo "ALIAS_NAME=${ANDROID_KEY_ALIAS:-telegrios}"
-              echo "ALIAS_PASS=${ANDROID_KEY_PASS:-$ANDROID_KEYSTORE_PASS}"
-            } >> nagram/local.properties
+              echo "RELEASE_STORE_PASSWORD=$ANDROID_KEYSTORE_PASS"
+              echo "RELEASE_KEY_ALIAS=${ANDROID_KEY_ALIAS:-telegrios}"
+              echo "RELEASE_KEY_PASSWORD=${ANDROID_KEY_PASS:-$ANDROID_KEYSTORE_PASS}"
+            } >> telegram/gradle.properties
             echo "Signing with the keystore from repo secrets (stable signature)."
           else
-            rm -f "$KS"   # Nagram ships its own release.keystore with an unknown password - drop it first
-            keytool -genkeypair -v -keystore "$KS" -alias telegrios -keyalg RSA -keysize 2048 \
-              -validity 10950 -storepass spectra2024 -keypass spectra2024 \
-              -dname "CN=Telegrios, OU=Telegrios, O=Telegrios, L=Internet, ST=Internet, C=RU"
-            {
-              echo "KEYSTORE_PASS=spectra2024"
-              echo "ALIAS_NAME=telegrios"
-              echo "ALIAS_PASS=spectra2024"
-            } >> nagram/local.properties
-            cp "$KS" telegrios-generated.keystore
-            echo "GENERATED_KEYSTORE=1" >> $GITHUB_ENV
-            echo "::notice::No ANDROID_KEYSTORE_B64 secret - generated a fresh keystore for this run. Save the Telegrios-keystore artifact and add it as a secret if you want updates to install over older builds."
+            echo "::notice::No ANDROID_KEYSTORE_B64 secret - the build is signed with the keystore committed in the official tree (creds: android/androidkey). This is still stable between runs; add your own keystore as secrets to keep one signature across rebuilds."
           fi
 
       - name: Build APK (arm64-v8a)
-        working-directory: nagram
+        working-directory: telegram
         env:
-          NATIVE_TARGET: arm64-v8a
           BUILD_TYPE: ${{ github.event.inputs.build_type || 'release' }}
         run: |
           set -o pipefail
           if [ "$BUILD_TYPE" = "debug" ]; then
-            TASK=TMessagesProj:assembleDebug
+            TASK=:TMessagesProj_App:assembleAfatDebug
           else
-            TASK=TMessagesProj:assembleRelease
+            TASK=:TMessagesProj_App:assembleAfatRelease
           fi
           echo "Building $TASK ..."
           ./gradlew "$TASK" --build-cache --no-configuration-cache 2>&1 | tee build.log
 
-      - name: Verify native libs inside the APK
+      - name: Verify the APK exists and contains native libraries
         run: |
-          APK=$(find nagram/TMessagesProj/build/outputs/apk -name "*arm64-v8a*.apk" | head -1)
+          APK=$(find telegram/TMessagesProj_App/build/outputs/apk -name "*.apk" | head -1)
           if [ -z "$APK" ]; then
-            echo "::error::No arm64-v8a APK produced by the build"
+            echo "::error::No APK produced by the build"
             exit 1
           fi
           if ! unzip -l "$APK" | grep -q "lib/arm64-v8a/libtmessages"; then
@@ -126,38 +112,26 @@ jobs:
           fi
           echo "Native libs OK in $(basename "$APK"):"
           unzip -l "$APK" | grep "lib/arm64-v8a/" | head -10
+          echo "APK_PATH=$APK" >> $GITHUB_ENV
 
       - name: Collect artifacts
         run: |
           mkdir -p out
           TYPE=${{ github.event.inputs.build_type || 'release' }}
-          # exactly one APK: only the arm64-v8a build goes into the artifact
-          find nagram/TMessagesProj/build/outputs/apk -name "*arm64-v8a*.apk" -exec cp {} out/ \;
-          cd out
-          for f in *arm64-v8a*.apk; do
-            [ -e "$f" ] && mv "$f" "Telegrios-v1.3-${TYPE}-arm64.apk"
-          done
-          ls -la
+          cp "$APK_PATH" "out/Telegrios-v2.0-${TYPE}-arm64.apk"
+          ls -la out
 
-      - name: Upload APK artifacts
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: Telegrios-APK
           path: out/*.apk
           if-no-files-found: error
 
-      - name: Upload generated keystore (save it for stable signing)
-        if: env.GENERATED_KEYSTORE == '1'
-        uses: actions/upload-artifact@v4
-        with:
-          name: Telegrios-keystore
-          path: telegrios-generated.keystore
-          if-no-files-found: ignore
-
       - name: Upload build log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: Telegrios-build-log
-          path: nagram/build.log
+          path: telegram/build.log
           if-no-files-found: ignore
