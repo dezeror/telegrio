@@ -118,7 +118,7 @@ jobs:
         run: |
           mkdir -p out
           TYPE=${{ github.event.inputs.build_type || 'release' }}
-          cp "$APK_PATH" "out/Telegrios-v2.0-${TYPE}-arm64.apk"
+          cp "$APK_PATH" "out/Telegrios-v2.0.1-${TYPE}-arm64.apk"
           ls -la out
 
       - name: Upload APK artifact
