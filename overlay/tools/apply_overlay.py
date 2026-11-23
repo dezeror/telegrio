@@ -3976,6 +3976,52 @@ def write_java(main_dir):
 
 # --- startup patches ---------------------------------------------------------
 
+def patch_native_integrity(app_dir):
+    # Nagram's native library verifies its own APK signature inside JNI_OnLoad
+    # (TMessagesProj/jni/integrity/integrity.cpp): it SHA1-hashes the signing
+    # certificate and compares it with the OFFICIAL Nagram release certificate.
+    # Any third-party build signed with its own key fails the check, JNI_OnLoad
+    # returns JNI_ERR, System.loadLibrary throws UnsatisfiedLinkError and
+    # ApplicationLoader.onCreate crashes with
+    # "can't load native libraries <abi> lookup folder <abi>" right at startup.
+    # Neutralize the check so the mod can be signed with our own keystore.
+    p = os.path.join(app_dir, "jni", "integrity", "integrity.cpp")
+    if not os.path.isfile(p):
+        step("native signature check (JNI_OnLoad)", True, "no jni/integrity module upstream - nothing to patch")
+        return
+    text = open(p, encoding="utf-8").read()
+    if "Telegrios mod" in text:
+        step("native signature check (JNI_OnLoad)", True, "already neutralized")
+        return
+    m = re.search(r'int\s+verifySign\s*\(\s*JNIEnv\s*\*\s*env\s*\)\s*\{', text)
+    if not m:
+        sys.exit("ERROR: jni/integrity/integrity.cpp exists but verifySign() was not found - "
+                 "upstream changed the native signature check and the overlay needs an update. "
+                 "Stopping on purpose: an unpatched build would crash at startup.")
+    # locate the end of the function body with a simple brace-balance scan
+    depth, i, n = 1, m.end(), len(text)
+    while i < n and depth > 0:
+        c = text[i]
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+        i += 1
+    if depth != 0:
+        sys.exit("ERROR: could not locate the end of verifySign() in jni/integrity/integrity.cpp")
+    replacement = (
+        'int verifySign(JNIEnv *env) {\n'
+        '    // Telegrios mod: the APK is signed with our own key, so the upstream\n'
+        '    // certificate comparison would fail, JNI_OnLoad would return JNI_ERR and\n'
+        '    // the app would crash at startup ("can\'t load native libraries").\n'
+        '    (void) env;\n'
+        '    return JNI_OK;\n'
+        '}'
+    )
+    text = text[:m.start()] + replacement + text[i:]
+    open(p, "w", encoding="utf-8").write(text)
+    step("native signature check (JNI_OnLoad)", True, "verifySign() neutralized - own signing key accepted")
+
 def patch_application_loader(main_dir):
     # Passive crash logging only: append stack traces to a shareable file.
     # NO flow changes, NO early returns, NO activities launched.
@@ -4134,6 +4180,10 @@ def main():
     # 1b. Crash diagnostics v3
     patch_application_loader(main_dir)
     patch_launch_activity(main_dir)
+
+    # 1c. Nagram's native signature check (JNI_OnLoad) must accept our own key,
+    # otherwise the app crashes at startup with "can't load native libraries".
+    patch_native_integrity(app)
 
     # 2. Icons (Telegram-style, both naming schemes + adaptive)
     try:
