@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Applies the Telegrios overlay (v2.0) onto the OFFICIAL Telegram-Android checkout.
+"""Applies the Telegrios overlay (v2.0.1) onto the OFFICIAL Telegram-Android checkout.
 
 Base repository: https://github.com/TelegramMessenger/Telegram-Android
 
@@ -20,6 +20,7 @@ their anchor fail loudly instead of producing a broken build.
 
 import argparse
 import base64
+import json
 import os
 import re
 import sys
@@ -2149,30 +2150,52 @@ def patch_gradle(repo, app_dir, application_id, abi):
 
 # --- google services -------------------------------------------------------------
 
-def patch_google_services(app_dir, application_id):
-    gs = os.path.join(app_dir, "google-services.json")
-    if not os.path.isfile(gs):
-        step("google-services.json", False, "file not found")
-        return
-    try:
-        import json as _json
-        data = _json.load(open(gs, encoding="utf-8"))
-        pkgs = [c.get("client_info", {}).get("android_client_info", {}).get("package_name")
-                for c in data.get("client", [])]
-        if application_id in pkgs:
-            step(f"google-services.json already contains {application_id}", True)
-            return
-        if data.get("client"):
-            # base package + the suffixed variants used by debug/standalone builds
-            for suffix in ("", ".beta", ".web"):
-                clone = _json.loads(_json.dumps(data["client"][0]))
+def patch_google_services(repo, application_id):
+    # The 2025 repo restructure moved the app into dedicated modules, EACH with its own
+    # google-services.json: TMessagesProj, TMessagesProj_App (built by :TMessagesProj_App:
+    # assembleAfatRelease), TMessagesProj_AppHockeyApp, TMessagesProj_AppHuawei,
+    # TMessagesProj_AppStandalone. A client for the new package must be added to ALL of
+    # them, otherwise :TMessagesProj_App:processAfatReleaseGoogleServices fails with
+    # "No matching client found for package name <application_id>".
+    found = []
+    for root, dirs, files in os.walk(repo):
+        dirs[:] = [d for d in dirs if d not in (".git", ".gradle", ".cxx", "build")]
+        if "google-services.json" in files:
+            found.append(os.path.join(root, "google-services.json"))
+    if not found:
+        sys.exit("ERROR: no google-services.json found anywhere in the tree - the "
+                 "google-services gradle plugin would fail the build for package "
+                 f"'{application_id}'")
+    wanted = [application_id + s for s in ("", ".beta", ".web")]
+    patched = []
+    for gs in sorted(found):
+        rel = os.path.relpath(gs, repo)
+        try:
+            with open(gs, encoding="utf-8") as f:
+                data = json.load(f)
+            clients = data.get("client") or []
+            if not clients:
+                sys.exit(f"ERROR: {rel} has no 'client' entries - cannot clone a client "
+                         f"for '{application_id}'")
+            pkgs = [c.get("client_info", {}).get("android_client_info", {}).get("package_name")
+                    for c in clients]
+            missing = [w for w in wanted if w not in pkgs]
+            if not missing:
+                step("google-services.json: clients present", True, rel)
+                continue
+            for pkg in missing:
+                clone = json.loads(json.dumps(clients[0]))
                 clone.setdefault("client_info", {}).setdefault(
-                    "android_client_info", {})["package_name"] = application_id + suffix
+                    "android_client_info", {})["package_name"] = pkg
                 data["client"].append(clone)
-        _json.dump(data, open(gs, "w", encoding="utf-8"), indent=2)
-        step(f"google-services.json: client for {application_id} added", True, f"was: {pkgs}")
-    except Exception as e:
-        step("google-services.json patch", False, str(e))
+            with open(gs, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            step("google-services.json: clients added", True, f"{rel} (+{', '.join(missing)})")
+            patched.append(rel)
+        except json.JSONDecodeError as e:
+            sys.exit(f"ERROR: {rel} is not valid JSON: {e}")
+    step(f"google-services.json patched in {len(patched)}/{len(found)} modules", True,
+         "applicationId resolvable for every google-services plugin task")
 
 # --- app label -------------------------------------------------------------------
 
@@ -2289,7 +2312,7 @@ def main():
         sys.exit(1)
     res = os.path.join(main_dir, "res")
 
-    print(f"Applying Telegrios overlay v2.0 to {repo} (official Telegram-Android)")
+    print(f"Applying Telegrios overlay v2.0.1 to {repo} (official Telegram-Android)")
 
     # 1. Java sources (org.telegram.telegrios)
     try:
@@ -2323,8 +2346,8 @@ def main():
     # 7. Gradle: applicationId, ABI, minify
     patch_gradle(repo, app, args.application_id, args.abi)
 
-    # 8. google-services.json client for the new package
-    patch_google_services(app, args.application_id)
+    # 8. google-services.json clients for the new package (ALL app modules)
+    patch_google_services(repo, args.application_id)
 
     # 9. App label (Telegram -> Telegrios) across manifests/strings
     patch_app_label(repo, res, args.app_name)
